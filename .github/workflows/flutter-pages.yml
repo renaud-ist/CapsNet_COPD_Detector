@@ -40,6 +40,7 @@ jobs:
           wget -q --show-progress "$FLUTTER_URL"
           tar xf "$FLUTTER_TAR"
           echo "${{ github.workspace }}/flutter/bin" >> $GITHUB_PATH
+          export PATH="${{ github.workspace }}/flutter/bin:$PATH"
           flutter --version
 
       - name: Flutter pub get
