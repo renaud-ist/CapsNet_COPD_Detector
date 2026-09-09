@@ -1,0 +1,60 @@
+# Builds Flutter web with Flutter 3.47.2 and deploys build/web to GitHub Pages
+name: Deploy Flutter Web to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+jobs:
+  build-and-deploy:
+    name: Build and deploy to GitHub Pages
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: https://renaud-ist.github.io/CapsNet_COPD_Detector/
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Cache Pub packages
+        uses: actions/cache@v4
+        with:
+          path: ~/.pub-cache
+          key: ${{ runner.os }}-pub-${{ hashFiles('**/pubspec.lock') }}
+          restore-keys: ${{ runner.os }}-pub-
+
+      - name: Install Flutter 3.47.2 (Linux)
+        run: |
+          set -euo pipefail
+          FLUTTER_VERSION=3.47.2
+          FLUTTER_TAR=flutter_linux_${FLUTTER_VERSION}-stable.tar.xz
+          FLUTTER_URL="https://storage.googleapis.com/flutter_infra_release/releases/stable/linux/${FLUTTER_TAR}"
+          echo "Downloading $FLUTTER_URL"
+          wget -q --show-progress "$FLUTTER_URL"
+          tar xf "$FLUTTER_TAR"
+          echo "${{ github.workspace }}/flutter/bin" >> $GITHUB_PATH
+          flutter --version
+
+      - name: Flutter pub get
+        run: flutter pub get
+
+      - name: Build web (release) with repository base path
+        run: flutter build web --release --base-href /CapsNet_COPD_Detector/
+
+      - name: Configure Pages (prepare repository for deployment)
+        uses: actions/configure-pages@v5
+
+      - name: Upload Pages artifact (build/web)
+        uses: actions/upload-pages-artifact@v4
+        with:
+          path: build/web
+
+      - name: Deploy to GitHub Pages
+        uses: actions/deploy-pages@v4
