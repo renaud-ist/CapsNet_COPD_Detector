@@ -1,13 +1,11 @@
 import 'package:flutter/material.dart';
 import 'package:image_picker/image_picker.dart';
-import 'dart:io';
+import 'dart:convert';
 import 'dart:typed_data';
 import 'package:flutter/services.dart';
-import 'package:tflite_flutter/tflite_flutter.dart';
+import 'package:flutter_litert/flutter_litert.dart';
 import 'package:image/image.dart' as img;
-import 'package:path_provider/path_provider.dart';
-import 'package:path/path.dart' as p;
-import 'package:sqflite/sqflite.dart';
+import 'package:shared_preferences/shared_preferences.dart';
 
 void main() async {
   WidgetsFlutterBinding.ensureInitialized();
@@ -16,7 +14,7 @@ void main() async {
 
 class AnalysisRecord {
   final int? id;
-  final String imagePath;
+  final Uint8List imageBytes;
   final String resultType;
   final String resultText;
   final double confidence;
@@ -25,7 +23,7 @@ class AnalysisRecord {
 
   const AnalysisRecord({
     this.id,
-    required this.imagePath,
+    required this.imageBytes,
     required this.resultType,
     required this.resultText,
     required this.confidence,
@@ -36,7 +34,7 @@ class AnalysisRecord {
   Map<String, dynamic> toMap() {
     return {
       'id': id,
-      'image_path': imagePath,
+      'image_bytes': base64Encode(imageBytes),
       'result_type': resultType,
       'result_text': resultText,
       'confidence': confidence,
@@ -48,7 +46,7 @@ class AnalysisRecord {
   factory AnalysisRecord.fromMap(Map<String, dynamic> map) {
     return AnalysisRecord(
       id: map['id'] as int?,
-      imagePath: map['image_path'] as String,
+      imageBytes: base64Decode(map['image_bytes'] as String),
       resultType: map['result_type'] as String,
       resultText: map['result_text'] as String,
       confidence: (map['confidence'] as num).toDouble(),
@@ -66,64 +64,57 @@ class AnalysisHistoryDatabase {
   static final AnalysisHistoryDatabase instance =
       AnalysisHistoryDatabase._();
 
-  static Database? _database;
+  static const _storageKey = 'analysis_history';
+  static SharedPreferences? _preferences;
 
-  Future<Database> get database async {
-    if (_database != null) {
-      return _database!;
-    }
-    _database = await _initDatabase();
-    return _database!;
+  Future<SharedPreferences> get preferences async {
+    return _preferences ??= await SharedPreferences.getInstance();
   }
 
-  Future<Database> _initDatabase() async {
-    final dbPath = await getDatabasesPath();
-    final path = p.join(dbPath, 'analysis_history.db');
+  Future<List<AnalysisRecord>> _readRecords() async {
+    final stored = (await preferences).getStringList(_storageKey) ?? [];
+    return stored
+        .map((value) => AnalysisRecord.fromMap(
+              jsonDecode(value) as Map<String, dynamic>,
+            ))
+        .toList();
+  }
 
-    return openDatabase(
-      path,
-      version: 1,
-      onCreate: (db, version) async {
-        await db.execute('''
-          CREATE TABLE analysis_history (
-            id INTEGER PRIMARY KEY AUTOINCREMENT,
-            image_path TEXT NOT NULL,
-            result_type TEXT NOT NULL,
-            result_text TEXT NOT NULL,
-            confidence REAL NOT NULL,
-            description TEXT NOT NULL,
-            timestamp INTEGER NOT NULL
-          )
-        ''');
-      },
+  Future<void> _writeRecords(List<AnalysisRecord> records) async {
+    await (await preferences).setStringList(
+      _storageKey,
+      records.map((record) => jsonEncode(record.toMap())).toList(),
     );
   }
 
   Future<int> insertRecord(AnalysisRecord record) async {
-    final db = await database;
-    return db.insert(
-      'analysis_history',
-      record.toMap(),
-      conflictAlgorithm: ConflictAlgorithm.replace,
-    );
+    final records = await _readRecords();
+    final id = record.id ?? DateTime.now().microsecondsSinceEpoch;
+    records.add(AnalysisRecord(
+      id: id,
+      imageBytes: record.imageBytes,
+      resultType: record.resultType,
+      resultText: record.resultText,
+      confidence: record.confidence,
+      description: record.description,
+      timestamp: record.timestamp,
+    ));
+    await _writeRecords(records);
+    return id;
   }
 
   Future<List<AnalysisRecord>> fetchRecords() async {
-    final db = await database;
-    final maps = await db.query(
-      'analysis_history',
-      orderBy: 'timestamp DESC',
-    );
-    return maps.map(AnalysisRecord.fromMap).toList();
+    final records = await _readRecords();
+    records.sort((a, b) => b.timestamp.compareTo(a.timestamp));
+    return records;
   }
 
   Future<int> deleteRecord(int id) async {
-    final db = await database;
-    return db.delete(
-      'analysis_history',
-      where: 'id = ?',
-      whereArgs: [id],
-    );
+    final records = await _readRecords();
+    final originalLength = records.length;
+    records.removeWhere((record) => record.id == id);
+    await _writeRecords(records);
+    return originalLength - records.length;
   }
 }
 
@@ -297,15 +288,6 @@ class _HistoryScreenState extends State<HistoryScreen> {
 
     if (record.id != null) {
       await AnalysisHistoryDatabase.instance.deleteRecord(record.id!);
-    }
-
-    try {
-      final file = File(record.imagePath);
-      if (await file.exists()) {
-        await file.delete();
-      }
-    } catch (_) {
-      // Ignore file system errors when attempting to delete saved images.
     }
 
     if (!mounted) {
@@ -504,9 +486,6 @@ class _HistoryRecordCard extends StatelessWidget {
   @override
   Widget build(BuildContext context) {
     final accentColor = _colorForResult();
-    final file = File(record.imagePath);
-    final imageExists = file.existsSync();
-
     return Container(
       decoration: BoxDecoration(
         borderRadius: BorderRadius.circular(20),
@@ -597,11 +576,8 @@ class _HistoryRecordCard extends StatelessWidget {
               height: 180,
               width: double.infinity,
               color: Colors.black,
-              child: imageExists
-                  ? Image.file(
-                      file,
-                      fit: BoxFit.cover,
-                    )
+              child: record.imageBytes.isNotEmpty
+                  ? Image.memory(record.imageBytes, fit: BoxFit.cover)
                   : Center(
                       child: Text(
                         'Saved image not found',
@@ -650,7 +626,7 @@ class HomeScreen extends StatefulWidget {
 }
 
 class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
-  File? _selectedImage;
+  XFile? _selectedImage;
   final ImagePicker _picker = ImagePicker();
   late AnimationController _pulseController;
   late Animation<double> _pulseAnimation;
@@ -679,7 +655,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
       final XFile? image = await _picker.pickImage(source: source);
       if (image != null) {
         setState(() {
-          _selectedImage = File(image.path);
+          _selectedImage = image;
         });
       }
     } catch (e) {
@@ -936,7 +912,15 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
                       ),
                       child: ClipRRect(
                         borderRadius: BorderRadius.circular(20),
-                        child: Image.file(_selectedImage!, fit: BoxFit.cover),
+                        child: FutureBuilder<Uint8List>(
+                          future: _selectedImage!.readAsBytes(),
+                          builder: (context, snapshot) {
+                            if (!snapshot.hasData) {
+                              return const Center(child: CircularProgressIndicator());
+                            }
+                            return Image.memory(snapshot.data!, fit: BoxFit.cover);
+                          },
+                        ),
                       ),
                     ),
 
@@ -1044,7 +1028,7 @@ class _HomeScreenState extends State<HomeScreen> with TickerProviderStateMixin {
 }
 
 class AnalysisScreen extends StatefulWidget {
-  final File image;
+  final XFile image;
 
   const AnalysisScreen({Key? key, required this.image}) : super(key: key);
 
@@ -1098,6 +1082,7 @@ class _AnalysisScreenState extends State<AnalysisScreen>
   void _startAnalysis() async {
     _loadingController.repeat();
     try {
+      await initializeWeb();
       final interpreter = await Interpreter.fromAsset('model/model.tflite');
       final labelsData = await rootBundle.loadString('model/labels.txt');
       final labels = labelsData
@@ -1182,22 +1167,10 @@ class _AnalysisScreenState extends State<AnalysisScreen>
 
   Future<void> _saveResults() async {
     try {
-      final documentsDirectory = await getApplicationDocumentsDirectory();
-      final imagesDirectory =
-          Directory(p.join(documentsDirectory.path, 'analysis_images'));
-      if (!await imagesDirectory.exists()) {
-        await imagesDirectory.create(recursive: true);
-      }
-
-      final extension = p.extension(widget.image.path);
-      final timestamp = DateTime.now().millisecondsSinceEpoch;
-      final fileName =
-          'copd_analysis_$timestamp${extension.isNotEmpty ? extension : '.png'}';
-      final targetPath = p.join(imagesDirectory.path, fileName);
-      final savedImage = await widget.image.copy(targetPath);
+      final imageBytes = await widget.image.readAsBytes();
 
       final record = AnalysisRecord(
-        imagePath: savedImage.path,
+        imageBytes: imageBytes,
         resultType: _result.name,
         resultText: _resultText,
         confidence: _confidence,
@@ -1361,7 +1334,20 @@ class _AnalysisScreenState extends State<AnalysisScreen>
                         ),
                         child: ClipRRect(
                           borderRadius: BorderRadius.circular(16),
-                          child: Image.file(widget.image, fit: BoxFit.cover),
+                          child: FutureBuilder<Uint8List>(
+                            future: widget.image.readAsBytes(),
+                            builder: (context, snapshot) {
+                              if (!snapshot.hasData) {
+                                return const Center(
+                                  child: CircularProgressIndicator(),
+                                );
+                              }
+                              return Image.memory(
+                                snapshot.data!,
+                                fit: BoxFit.cover,
+                              );
+                            },
+                          ),
                         ),
                       ),
 
