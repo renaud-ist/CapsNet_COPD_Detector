@@ -1,0 +1,3 @@
+0 COPD
+1 NO_COPD
+2 NO_XRAY
